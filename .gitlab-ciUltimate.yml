@@ -1,0 +1,250 @@
+include:
+  - template: Security/Secret-Detection.gitlab-ci.yml
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/Dependency-Scanning.gitlab-ci.yml
+  - template: Security/License-Scanning.gitlab-ci.yml
+  - template: Code-Quality.gitlab-ci.yml
+  - template: DAST-API.gitlab-ci.yml
+
+variables:
+  MAVEN_OPTS: "-Xdebug -Xnoagent -Dhttps.protocols=TLSv1.2 -Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=WARN -Dorg.slf4j.simpleLogger.showDateTime=true -Djava.awt.headless=true"
+  MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version -DinstallAtEnd=true -DdeployAtEnd=true -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true -Dmaven.wagon.http.ssl.ignore.validity.dates=true"
+  SAST_JAVA_VERSION: 11
+  DAST_API_POSTMAN_COLLECTION: secure.postman_collection.json
+  DAST_API_TARGET_URL: https://servicevuproject-servicevuopenshift.apps.closnoprod.austro.grpfin/
+  DS_JAVA_VERSION: 11
+image: maven:3.8.4-jdk-11
+
+cache:
+  paths:
+    - .m2/repository
+
+stages:
+  - build
+  - test
+  - dast
+  - prepare
+  - build-container
+  - deploy
+
+
+# >>>>>>>>>> ALL BRANCH <<<<<<<<<<<
+build_maven:
+  stage: build
+  image: maven:3.8.4-jdk-11
+  script:
+    - cd CodigoFuente
+    - 'mvn $MAVEN_CLI_OPTS clean install'
+  artifacts:
+    paths:
+      - CodigoFuente/target/*.jar
+
+spotbugs-sast:
+  dependencies:
+    - build_maven
+  variables:
+    MAVEN_REPO_PATH: '$CI_PROJECT_DIR/.m2/repository'
+    COMPILE: "false"
+
+#  PRUEBAS UNITARIAS
+unit_test:
+  stage: test
+  script:
+    - cd CodigoFuente
+    - 'mvn $MAVEN_CLI_OPTS clean install'
+  artifacts:
+    when: always
+    reports:
+      junit:
+        - CodigoFuente/target/surefire-reports/TEST-*.xml
+# >>>>>>>>>> ISSUES <<<<<<<<<<<
+
+openshift-create-project-issue:
+  stage: prepare
+  image: ${GITLAB_IMAGEN_LOCAL}/origin-cli
+  only:
+    - /^issue-.*$/
+  script:
+    - cp ${OPENSHIFT_API_CERTIFICATE} /etc/pki/ca-trust/source/anchors/openshift-api-ca.crt
+    - update-ca-trust
+    - oc login --token ${OPENSHIFT_TOKEN} ${OPENSHIFT_API}
+    - oc get project ${OPENSHIFT_PROJECT}-${CI_COMMIT_BRANCH} || oc new-project ${OPENSHIFT_PROJECT}-${CI_COMMIT_BRANCH}
+
+podman-build-issue:
+  stage: build-container
+  image: ${GITLAB_IMAGEN_LOCAL}/podman-stable
+  only:
+    - /^issue-.*$/
+  script:
+    - mkdir -p /etc/containers/certs.d/${OPENSHIFT_REGISTRY}
+    - cp ${OPENSHIFT_REGISTRY_CERTIFICATE} /etc/containers/certs.d/${OPENSHIFT_REGISTRY}/ca.crt
+    - cp CodigoFuente/target/*.jar Configuraciones/
+    - cd Configuraciones
+    - ls
+    - >
+      if [[ $CI_COMMIT_BRANCH == "dev" ]];then
+        cp ${VU_SERVER_DEV_CERTIFICATE} cad.crt
+        cp cad.crt Configuraciones/
+      else if [[ $CI_COMMIT_BRANCH == "prod" ]];then
+        cp ${VU_SERVER_PROD_CERTIFICATE} cad.crt
+        cp cad.crt Configuraciones/
+      else if [[ $CI_COMMIT_BRANCH == "qa" ]];then
+        cp ${VU_SERVER_QA_CERTIFICATE} cad.crt
+        cp cad.crt Configuraciones/
+      else
+        echo "No se ha encontrado la variable CI_COMMIT_BRANCH"
+      fi
+    - podman login -u gitlab -p ${OPENSHIFT_TOKEN} ${OPENSHIFT_REGISTRY}
+    - podman build -t ${OPENSHIFT_REGISTRY}/${OPENSHIFT_PROJECT}-${CI_COMMIT_BRANCH}/${PROJECT}:latest -f Dockerfile .
+    - podman push ${OPENSHIFT_REGISTRY}/${OPENSHIFT_PROJECT}-${CI_COMMIT_BRANCH}/${PROJECT}:latest
+
+openshift-deploy-issue:
+  stage: deploy
+  image: ${GITLAB_IMAGEN_LOCAL}/origin-cli
+  only:
+    - /^issue-.*$/
+  script:
+    - cp ${OPENSHIFT_API_CERTIFICATE} /etc/pki/ca-trust/source/anchors/openshift-api-ca.crt
+    - update-ca-trust
+    - oc login --token ${OPENSHIFT_TOKEN} ${OPENSHIFT_API}
+    - oc get deployment ${PROJECT} -n ${OPENSHIFT_PROJECT}-${CI_COMMIT_BRANCH} || oc new-app --name ${PROJECT} -n ${OPENSHIFT_PROJECT}-${CI_COMMIT_BRANCH} --image image-registry.openshift-image-registry.svc:5000/${OPENSHIFT_PROJECT}-${CI_COMMIT_BRANCH}/${PROJECT}:latest
+    - oc get route ${PROJECT} -n ${OPENSHIFT_PROJECT}-${CI_COMMIT_BRANCH} || oc create route edge --insecure-policy=Redirect --service ${PROJECT} --port=6055 -n ${OPENSHIFT_PROJECT}-${CI_COMMIT_BRANCH}
+
+
+# >>>>>>>>>> DEV <<<<<<<<<<<
+
+openshift-create-project-dev:
+  stage: prepare
+  image: ${GITLAB_IMAGEN_LOCAL}/origin-cli
+  only:
+    - dev
+  script:
+    - cp ${OPENSHIFT_API_CERTIFICATE} /etc/pki/ca-trust/source/anchors/openshift-api-ca.crt
+    - update-ca-trust
+    - oc login --token ${OPENSHIFT_TOKEN} ${OPENSHIFT_API}
+    - oc get project ${OPENSHIFT_PROJECT} || oc new-project ${OPENSHIFT_PROJECT}
+
+podman-build-dev:
+  stage: build-container
+  image: ${GITLAB_IMAGEN_LOCAL}/podman-stable
+  only:
+    - dev
+  script:
+    - mkdir -p /etc/containers/certs.d/${OPENSHIFT_REGISTRY}
+    - cp ${OPENSHIFT_REGISTRY_CERTIFICATE} /etc/containers/certs.d/${OPENSHIFT_REGISTRY}/ca.crt
+    - cp ${VU_SERVER_DEV_CERTIFICATE} cad.crt
+    - cp ${OPENSHIFT_REGISTRY_CERTIFICATE} openshiftcertificado.crt
+    - cp openshiftcertificado.crt Configuraciones/
+    - cp cad.crt Configuraciones/
+    - cp CodigoFuente/target/*.jar Configuraciones/
+    - cd Configuraciones
+    - ls
+    - podman login -u gitlab -p ${OPENSHIFT_TOKEN} ${OPENSHIFT_REGISTRY}
+    - podman build -t ${OPENSHIFT_REGISTRY}/${OPENSHIFT_PROJECT}/${PROJECT}:latest -f Dockerfile .
+    - podman push ${OPENSHIFT_REGISTRY}/${OPENSHIFT_PROJECT}/${PROJECT}:latest
+
+
+openshift-deploy-dev:
+  stage: deploy
+  image: ${GITLAB_IMAGEN_LOCAL}/origin-cli
+  only:
+    - dev
+  environment:
+    name: dev
+    url: http://${PROJECT}-${OPENSHIFT_PROJECT}-dev.apps.closnoprod.austro.grpfin
+  script:
+    - cp ${OPENSHIFT_API_CERTIFICATE} /etc/pki/ca-trust/source/anchors/openshift-api-ca.crt
+    - update-ca-trust
+    - oc login --token ${OPENSHIFT_TOKEN} ${OPENSHIFT_API}
+    - oc delete configmaps properties -n ${OPENSHIFT_PROJECT} && oc create configmap properties -n ${OPENSHIFT_PROJECT} --from-file=Configuraciones/propertiesDev/ || oc create configmap properties -n ${OPENSHIFT_PROJECT} --from-file=Configuraciones/propertiesDev/
+    - oc get deployment ${PROJECT} -n ${OPENSHIFT_PROJECT} || oc new-app --name ${PROJECT} -n ${OPENSHIFT_PROJECT} --image image-registry.openshift-image-registry.svc:5000/${OPENSHIFT_PROJECT}/${PROJECT}:latest
+    - oc set volume deployment/${PROJECT} -n ${OPENSHIFT_PROJECT} --add --name=volconfigmap --type=configmap --configmap-name=properties --mount-path=deployments/data/ --default-mode=064 || oc set volume deployment/${PROJECT} -n ${OPENSHIFT_PROJECT} --add --overwrite --name=volconfigmap --type=configmap --configmap-name=properties --mount-path=deployments/data/ --default-mode=064
+    - oc get route ${PROJECT} -n ${OPENSHIFT_PROJECT} || oc create route edge --insecure-policy=Redirect --service ${PROJECT} --port=6055 -n ${OPENSHIFT_PROJECT}
+
+# >>>>>>>>>> QA <<<<<<<<<<<   
+
+openshift-create-project-qa:
+  stage: prepare
+  image: ${GITLAB_IMAGEN_LOCAL}/origin-cli
+  only:
+    - qa
+  script:
+    - cp ${OPENSHIFT_API_CERTIFICATE} /etc/pki/ca-trust/source/anchors/openshift-api-ca.crt
+    - update-ca-trust
+    - oc login --token ${OPENSHIFT_TOKEN} ${OPENSHIFT_API}
+    - oc get project ${OPENSHIFT_PROJECT}-qa || oc new-project ${OPENSHIFT_PROJECT}-qa
+
+podman-build-qa:
+  stage: build-container
+  image: ${GITLAB_IMAGEN_LOCAL}/podman-stable
+  only:
+    - qa
+  script:
+    - mkdir -p /etc/containers/certs.d/${OPENSHIFT_REGISTRY}
+    - cp ${OPENSHIFT_REGISTRY_CERTIFICATE} /etc/containers/certs.d/${OPENSHIFT_REGISTRY}/ca.crt
+    - cp ${VU_SERVER_QA_CERTIFICATE} cad.crt
+    - cp cad.crt Configuraciones/
+    - cp CodigoFuente/target/*.jar Configuraciones/
+    - cd Configuraciones
+    - podman login -u gitlab -p ${OPENSHIFT_TOKEN} ${OPENSHIFT_REGISTRY}
+    - podman build -t ${OPENSHIFT_REGISTRY}/${OPENSHIFT_PROJECT}-qa/${PROJECT}:latest -f Dockerfile .
+    - podman push ${OPENSHIFT_REGISTRY}/${OPENSHIFT_PROJECT}-qa/${PROJECT}:latest
+
+openshift-deploy-qa:
+  stage: deploy
+  image: ${GITLAB_IMAGEN_LOCAL}/origin-cli
+  only:
+    - qa
+  script:
+    - cp ${OPENSHIFT_API_CERTIFICATE} /etc/pki/ca-trust/source/anchors/openshift-api-ca.crt
+    - update-ca-trust
+    - oc login --token ${OPENSHIFT_TOKEN} ${OPENSHIFT_API}
+    - oc delete configmaps properties -n ${OPENSHIFT_PROJECT}-qa && oc create configmap properties -n ${OPENSHIFT_PROJECT}-qa --from-file=Configuraciones/propertiesQA/ || oc create configmap properties -n ${OPENSHIFT_PROJECT}-qa --from-file=Configuraciones/propertiesQA/
+    - oc get deployment ${PROJECT} -n ${OPENSHIFT_PROJECT}-qa || oc new-app --name ${PROJECT} -n ${OPENSHIFT_PROJECT}-qa --image image-registry.openshift-image-registry.svc:5000/${OPENSHIFT_PROJECT}-qa/${PROJECT}:latest
+    - oc set volume deployment/${PROJECT} -n ${OPENSHIFT_PROJECT}-qa --add --name=volconfigmap --type=configmap --configmap-name=properties --mount-path=deployments/data/ --default-mode=064 || oc set volume deployment/${PROJECT} -n ${OPENSHIFT_PROJECT}-qa --add --overwrite --name=volconfigmap --type=configmap --configmap-name=properties --mount-path=deployments/data/ --default-mode=064
+    - oc get route ${PROJECT} -n ${OPENSHIFT_PROJECT}-qa || oc create route edge --insecure-policy=Redirect --service ${PROJECT} --port=6055 -n ${OPENSHIFT_PROJECT}-qa
+
+# >>>>>>>>>> PROD <<<<<<<<<<<   
+
+openshift-create-project-prod:
+  stage: prepare
+  image: ${GITLAB_IMAGEN_LOCAL}/origin-cli
+  only:
+    - prod
+  script:
+    - cp ${PROD_OPENSHIFT_API_CERTIFICATE} /etc/pki/ca-trust/source/anchors/openshift-api-ca.crt
+    - update-ca-trust
+    - oc login --token ${PROD_OPENSHIFT_TOKEN} ${PROD_OPENSHIFT_API}
+    - oc get project ${OPENSHIFT_PROJECT}-prod || oc new-project ${OPENSHIFT_PROJECT}-prod
+
+
+podman-build-prod:
+  stage: build-container
+  image: ${GITLAB_IMAGEN_LOCAL}/podman-stable
+  only:
+    - prod
+  script:
+    - mkdir -p /etc/containers/certs.d/${PROD_OPENSHIFT_REGISTRY}
+    - cp ${PROD_OPENSHIFT_REGISTRY_CERTIFICATE} /etc/containers/certs.d/${PROD_OPENSHIFT_REGISTRY}/ca.crt
+    - cp ${VU_SERVER_PROD_CERTIFICATE} cad.crt
+    - cp cad.crt Configuraciones/
+    - cp CodigoFuente/target/*.jar Configuraciones/
+    - cd Configuraciones
+    - podman login -u gitlab -p ${PROD_OPENSHIFT_TOKEN} ${PROD_OPENSHIFT_REGISTRY}
+    - podman build -t ${PROD_OPENSHIFT_REGISTRY}/${OPENSHIFT_PROJECT}-prod/${PROJECT}:latest -f Dockerfile .
+    - podman push ${PROD_OPENSHIFT_REGISTRY}/${OPENSHIFT_PROJECT}-prod/${PROJECT}:latest
+
+
+openshift-deploy-prod:
+  stage: deploy
+  image: ${GITLAB_IMAGEN_LOCAL}/origin-cli
+  only:
+    - prod
+  script:
+    - cp ${PROD_OPENSHIFT_API_CERTIFICATE} /etc/pki/ca-trust/source/anchors/openshift-api-ca.crt
+    - update-ca-trust
+    - oc login --token ${PROD_OPENSHIFT_TOKEN} ${PROD_OPENSHIFT_API}
+    - oc delete configmaps properties -n ${OPENSHIFT_PROJECT}-prod && oc create configmap properties -n ${OPENSHIFT_PROJECT}-prod --from-file=Configuraciones/propertiesProd/ || oc create configmap properties -n ${OPENSHIFT_PROJECT}-prod --from-file=Configuraciones/propertiesProd/
+    - oc get deployment ${PROJECT} -n ${OPENSHIFT_PROJECT}-prod || oc new-app --name ${PROJECT} -n ${OPENSHIFT_PROJECT}-prod --image image-registry.openshift-image-registry.svc:5000/${OPENSHIFT_PROJECT}-prod/${PROJECT}:latest
+    - oc set volume deployment/${PROJECT} -n ${OPENSHIFT_PROJECT}-prod --add --name=volconfigmap --type=configmap --configmap-name=properties --mount-path=deployments/data/ --default-mode=064 || oc set volume deployment/${PROJECT} -n ${OPENSHIFT_PROJECT}-prod --add --overwrite --name=volconfigmap --type=configmap --configmap-name=properties --mount-path=deployments/data/ --default-mode=064
+    - oc get route ${PROJECT} -n ${OPENSHIFT_PROJECT}-prod || oc create route edge --insecure-policy=Redirect --service ${PROJECT} --port=6055 -n ${OPENSHIFT_PROJECT}-prod

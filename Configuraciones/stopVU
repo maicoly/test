@@ -1,0 +1,2 @@
+pid=`ps aux | grep SERVICE-VU | awk '{print $2}'` 
+kill -9 $pid

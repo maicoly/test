@@ -1,0 +1,98 @@
+FROM registry.access.redhat.com/ubi8/openjdk-11:1.11
+
+
+
+USER root
+RUN rm -f /etc/localtime && ln -s /usr/share/zoneinfo/America/Guayaquil /etc/localtime
+
+#RUN mkdir /deployments/static
+#RUN ls
+COPY SERVICE-VU.jar /deployments/
+#COPY application.properties /deployments/data/
+#COPY bootstrap.properties /deployments/data/
+#COPY service-deviceEnrollment.properties /deployments/data/
+#COPY securityChannel.properties /deployments/data/
+#COPY consult.txt /deployments/static/
+#COPY pay.txt /deployments/static/
+#COPY notificacion_activacion.json /deployments/static/
+
+
+#RUN mkdir /home/archivosDeConfiguracion
+RUN mkdir /home/security
+#RUN mkdir /home/logs
+#COPY applicationSecureToken.properties /home/archivosDeConfiguracion
+#COPY securityChannel.properties /home/security
+#RUN chgrp -R 0 /deployments && chmod -R g=u /deployments && chgrp -R 0 /home/archivosDeConfiguracion && chmod -R g=u /home/archivosDeConfiguracion
+
+
+# copiar certificados para conexion micros openshift
+RUN chgrp -R 0 /home/security && chmod -R g=u /home/security
+
+COPY cad.crt /home/security
+COPY ca.crt /home/security
+
+RUN keytool -import -trustcacerts -alias adcuenca2 -file /home/security/cad.crt -keystore /usr/lib/jvm/java-11-openjdk/lib/security/cacerts -storepass changeit -noprompt
+
+COPY java.config /etc/crypto-policies/back-ends/
+
+RUN chgrp -R 0 /deployments && chmod -R g=u /deployments
+
+RUN chgrp -R 0 /etc/pki/ca-trust/source/anchors/ && chmod -R g=u /etc/pki/ca-trust/source/anchors/
+
+RUN chmod 777 /etc/pki/ca-trust/source/anchors/
+RUN cp /home/security/ca.crt /etc/pki/ca-trust/source/anchors/
+RUN cp /home/security/cad.crt /etc/pki/ca-trust/source/anchors/
+RUN cd /etc/pki/ca-trust/source/anchors/
+RUN ls
+RUN update-ca-trust
+
+
+
+#COPY java.config /etc/crypto-policies/back-ends/
+
+
+
+#COPY openshiftcertificado.crt /home/security
+
+#RUN chown -R 1001 /home/logs
+#RUN keytool -import -trustcacerts -alias serVU -file /home/security/cad.crt -keystore /usr/lib/jvm/java-11-openjdk/lib/security/cacerts -storepass changeit -noprompt
+#RUN keytool -import -trustcacerts -alias openshiftcertificado -file /home/security/openshiftcertificado.crt -keystore /usr/lib/jvm/java-11-openjdk/lib/security/cacerts -storepass changeit -noprompt
+#COPY java.config /etc/crypto-policies/back-ends/
+
+
+WORKDIR /home
+
+
+
+
+USER 1001
+EXPOSE 6055
+#, "--spring.config.location=file:///deployments/static/consult.txt", "--spring.config.location=file:///deployments/static/pay.txt", "--spring.config.location=file:///deployments/static/notificacion_activacion.json"
+CMD ["java", "-jar", "/deployments/SERVICE-VU.jar", "--spring.config.location=file:///deployments/data/bootstrap.properties", "--spring.config.location=file:///deployments/data/service-vu.properties"]
+
+
+USER root
+
+RUN mkdir /home/tmp
+COPY vuonboardprod.austro.grpfin.crt /home/tmp
+RUN cd /home/tmp
+RUN ls
+
+RUN chgrp -R 0 /home/tmp && chmod -R g=u /home/tmp
+RUN chmod 777 /home/tmp
+
+RUN chgrp -R 0 /etc/pki/ca-trust/source/anchors/ && chmod -R g=u /etc/pki/ca-trust/source/anchors/
+RUN chmod 777 /etc/pki/ca-trust/source/anchors/
+
+RUN cp /home/tmp/vuonboardprod.austro.grpfin.crt  /etc/pki/ca-trust/source/anchors/
+RUN cd /etc/pki/ca-trust/source/anchors/
+RUN ls
+RUN update-ca-trust extract
+
+COPY vuonboardprod.austro.grpfin.crt /home/tmp
+RUN cat /home/tmp/vuonboardprod.austro.grpfin.crt >> /etc/pki/tls/cert.pem
+
+RUN keytool -import -trustcacerts -alias serVU -file /home/tmp/vuonboardprod.austro.grpfin.crt -keystore /usr/lib/jvm/java-11-openjdk/lib/security/cacerts -storepass changeit -noprompt
+
+RUN keytool -import -trustcacerts -alias openshiftcertificado -file /home/tmp/vuonboardprod.austro.grpfin.crt -keystore /usr/lib/jvm/java-11-openjdk/lib/security/cacerts -storepass changeit -noprompt
+

@@ -1,0 +1,5 @@
+{
+    "code": "codeResponse",
+    "message": "messageResponse",
+    "reason": "reasonResponse"
+}
